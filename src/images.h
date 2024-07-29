@@ -1,7 +1,7 @@
 #ifndef IMAGES_H
 #define IMAGES_H
 
-#include <stdint.h>
+#include <cstdint>
 
 #define my_Logo_width 64
 #define my_Logo_height 64

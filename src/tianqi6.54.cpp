@@ -1,9 +1,12 @@
-#include "DEV_Config.h"
 #include "EPD.h"
 #include "GUI_Paint.h"
 #include "weather_icons.h"
 #include "images.h"
-#include <stdlib.h>
+//#include "ProvincesCities.h"
+#include "api_key.h"
+#include "cities.h"
+#include "portal.h"
+#include <cstdlib>
 #include <WiFi.h>
 #include <WiFiAP.h>
 #include <WebServer.h>
@@ -14,8 +17,8 @@
 #include <driver/adc.h>
 #include <esp_adc_cal.h>
 #include <mutex>
-#include "ProvincesCities.h"
 #include <vector>
+#include <map>
 
 #define DEFAULT_VREF    1100        // 默认参考电压
 #define CUSTOM_CONVERSION_FACTOR 2.989  // 调整后的校正转换因子
@@ -35,7 +38,7 @@ const char *paramFile = "/params.txt";
 const char *rebootCounterFile = "/rebootCounter.txt"; // 文件名记录重启计数
 const char *timeServer = "http://worldtimeapi.org/api/timezone/Asia/Shanghai";
 const char *weatherServer = "https://api.seniverse.com/v3/weather/daily.json";
-const char *weatherApiKey = "";//请前往“心知天气”免费申请密钥
+const char *weatherApiKey = WEATHER_API_KEY; // 请前往“心知天气”免费申请密钥
 
 PAINT_TIME sPaint_time;
 UBYTE *BlackImage = NULL;
@@ -59,10 +62,9 @@ int rebootCounter = 0; // 记录重启计数
 char ssid[32] = "";
 char password[32] = "";
 char city[32] = "";
-char province[32] = "";
 int birthdayMonth = 1; // 默认生日月份为1月
 int birthdayDay = 1;   // 默认生日日期为1日
-int syncHours[24] = {0, 3, 6, 9, 12, 15, 18, 21}; // 默认同步时间节点
+int syncHours[] = {0, 3, 6, 9, 12, 15, 18, 21}; // 默认同步时间节点
 int syncHoursCount = 8; // 默认同步时间节点数量
 
 bool connectToWiFi();
@@ -79,8 +81,6 @@ void displayWeatherInfo();
 
 void drawBoldChar(int x, int y, char ch, sFONT *font, int color, int bgcolor);
 
-const unsigned char *getWeatherIcon(const char *code);
-
 bool validateTime(bool timeStatus);
 
 bool validateWeather(bool weatherStatus);
@@ -92,7 +92,6 @@ void readParamsFromSPIFFS();
 void writeParamsToSPIFFS(const char *ssid,
                          const char *password,
                          const char *city,
-                         const char *province,
                          int birthdayMonth,
                          int birthdayDay,
                          const int *syncHours,
@@ -370,16 +369,7 @@ void clearScreen() {
 }
 
 bool isAnyParamEmpty() {
-  return (strlen(ssid) == 0 || strlen(password) == 0 || strlen(city) == 0 || strlen(province) == 0 || syncHoursCount == 0);
-}
-
-String scanWiFiNetworks() {
-  int n = WiFi.scanNetworks();
-  String options = "";
-  for (int i = 0; i < n; ++i) {
-    options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + "</option>";
-  }
-  return options;
+  return (strlen(ssid) == 0 || strlen(password) == 0 || strlen(city) == 0 || syncHoursCount == 0);
 }
 
 void startConfigPortal() {
@@ -391,138 +381,46 @@ void startConfigPortal() {
   SerialPrint("AP IP address: ");
   SerialPrintln(myIP);
 
-  // 读取已有参数
-  readParamsFromSPIFFS();
+  server.on("/", []() {
+    String html(portal_html_template);
 
-  // 扫描WiFi网络
-  int n = WiFi.scanNetworks();
-  String wifiOptions = "";
-  for (int i = 0; i < n; ++i) {
-    int rssi = WiFi.RSSI(i);
-    wifiOptions += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(rssi) + " dBm)</option>";
-  }
+    // 读取已有参数
+    readParamsFromSPIFFS();
 
-  // 生成省份选项
-  String provinceOptions = "";
-  for (int i = 0; i < sizeof(provincesCities) / sizeof(provincesCities[0]); ++i) {
-    provinceOptions += "<option value=\"" + String(i) + "\">" + String(provincesCities[i][0]) + "</option>";
-  }
-
-  // 生成月份选项
-  String monthOptions = "";
-  for (int i = 1; i <= 12; i++) {
-    monthOptions += "<option value=\"" + String(i) + "\">" + String(i) + "</option>";
-  }
-
-  // 生成日期选项
-  String dayOptions = "";
-  for (int i = 1; i <= 31; i++) {
-    dayOptions += "<option value=\"" + String(i) + "\">" + String(i) + "</option>";
-  }
-
-  // 生成时间同步节点选项
-  String hourOptions = "<label class=\"hour-label\"><input type=\"checkbox\" name=\"sync_hours\" value=\"0\" checked disabled>0:00</label>";
-  for (int i = 1; i < 24; i++) {
-    bool checked = false;
-    for (int j = 0; j < syncHoursCount; j++) {
-      if (i == syncHours[j]) {
-        checked = true;
-        break;
-      }
+    // 扫描WiFi网络
+    int n = WiFi.scanNetworks();
+    JsonDocument ssidDoc;
+    for (int i = 0; i < n; ++i) {
+      auto entry = ssidDoc.add<JsonObject>();
+      entry["ssid"] = WiFi.SSID(i);
+      entry["rssi"] = WiFi.RSSI(i);
     }
-    hourOptions += "<label class=\"hour-label\"><input type=\"checkbox\" name=\"sync_hours\" value=\"" + String(i) + "\"" + (checked ? " checked" : "") + ">" + String(
-      i) + ":00</label>";
-  }
+    String ssidJson;
+    serializeJson(ssidDoc, ssidJson);
+    html.replace("{{ ssids }}", ssidJson);
+    html.replace("{{ selected_ssid }}", ssid);
 
-  // 将 provincesCities 数组转换为 JavaScript 数组字符串
-  String jsArray = "[";
-  for (int i = 0; i < sizeof(provincesCities) / sizeof(provincesCities[0]); ++i) {
-    jsArray += "[";
-    for (int j = 0; j < 30 && provincesCities[i][j] != NULL; ++j) {
-      jsArray += "\"" + String(provincesCities[i][j]) + "\"";
-      if (j < 29 && provincesCities[i][j + 1] != NULL) {
-        jsArray += ",";
-      }
+    JsonDocument cityDoc;
+    deserializeJson(cityDoc, city_json);
+    String province_cities;
+    serializeJson(cityDoc, province_cities);
+    html.replace("{{ province_cities }}", province_cities);
+    html.replace("{{ selected_city }}", city);
+
+    JsonDocument syncHourDoc;
+    for (const auto hour : syncHours) {
+      syncHourDoc.add(hour);
     }
-    jsArray += "]";
-    if (i < (sizeof(provincesCities) / sizeof(provincesCities[0])) - 1) {
-      jsArray += ",";
-    }
-  }
-  jsArray += "]";
+    String syncHourJson;
+    serializeJson(syncHourDoc, syncHourJson);
+    html.replace("{{ sync_hours }}", syncHourJson);
 
-  // 使用已有参数预填充表单
-  String ssidValue = String(ssid);
-  String passwordValue = String(password);
-  String cityValue = String(city);
-  String provinceValue = String(province);
-  String birthdayMonthValue = String(birthdayMonth);
-  String birthdayDayValue = String(birthdayDay);
 
-  server.on("/",
-            [wifiOptions, provinceOptions, monthOptions, dayOptions, hourOptions, jsArray, ssidValue, passwordValue, cityValue, provinceValue, birthdayMonthValue, birthdayDayValue]() {
-              String page = "<!DOCTYPE html>"
-                            "<html>"
-                            "<head>"
-                            "<style>"
-                            "body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: Arial, sans-serif; }"
-                            "form { display: flex; flex-direction: column; align-items: center; max-width: 400px; width: 100%; }"
-                            "input, select { margin: 5px; padding: 10px; font-size: 16px; width: 100%; box-sizing: border-box; }"
-                            "input[type='submit'] { margin-top: 20px; padding: 10px 20px; width: auto; }"
-                            ".hour-label { display: inline-block; width: 60px; margin: 2px; }"
-                            ".hour-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }"
-                            ".inline-group { display: flex; justify-content: space-between; width: 100%; }"
-                            ".inline-group select { width: 48%; }"
-                            "</style>"
-                            "<script>"
-                            "const provincesCities = " + jsArray + ";"
-                                                                   "function updateCities() {"
-                                                                   "var provinceIndex = document.getElementById('province').value;"
-                                                                   "var citySelect = document.getElementById('city');"
-                                                                   "citySelect.innerHTML = '';"
-                                                                   "if (provinceIndex >= 0) {"
-                                                                   "var cities = provincesCities[provinceIndex];"
-                                                                   "if (cities.length === 1) {"
-                                                                   "var option = document.createElement('option');"
-                                                                   "option.value = cities[0];"
-                                                                   "option.text = cities[0];"
-                                                                   "citySelect.appendChild(option);"
-                                                                   "} else {"
-                                                                   "for (var i = 1; i < cities.length; i++) {"
-                                                                   "var option = document.createElement('option');"
-                                                                   "option.value = cities[i];"
-                                                                   "option.text = cities[i];"
-                                                                   "citySelect.appendChild(option);"
-                                                                   "}"
-                                                                   "}"
-                                                                   "}"
-                                                                   "}"
-                                                                   "</script>"
-                                                                   "</head>"
-                                                                   "<body>"
-                                                                   "<form action=\"/submit\" method=\"POST\">"
-                                                                   "SSID: <select name=\"ssid\" id=\"ssidSelect\">" + wifiOptions + "</select><br>"
-                                                                                                                                    "Password: <input type=\"password\" name=\"password\" value=\"" + passwordValue + "\"><br>"
-                                                                                                                                                                                                                      "<div class=\"inline-group\">"
-                                                                                                                                                                                                                      "Province: <select id=\"province\" name=\"province\" onchange=\"updateCities()\">" + provinceOptions + "</select>"
-                                                                                                                                                                                                                                                                                                                             "City: <select id=\"city\" name=\"city\"><option value=\"" + cityValue + "\">" + cityValue + "</option></select>"
-                                                                                                                                                                                                                                                                                                                                                                                                                          "</div><br>"
-                                                                                                                                                                                                                                                                                                                                                                                                                          "<div class=\"inline-group\">"
-                                                                                                                                                                                                                                                                                                                                                                                                                          "Birthday Month: <select name=\"birthday_month\" id=\"birthdayMonth\">" + monthOptions + "</select>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "Birthday Day: <select name=\"birthday_day\" id=\"birthdayDay\">" + dayOptions + "</select>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    "</div><br>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    "Sync Hours:<br><div class=\"hour-grid\">" + hourOptions + "</div>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               "<input type=\"submit\" value=\"Submit\"></form>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               "<script>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               "document.getElementById('ssidSelect').value = '" + ssidValue + "';"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               "document.getElementById('province').value = '" + provinceValue + "';"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 "document.getElementById('birthdayMonth').value = '" + birthdayMonthValue + "';"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             "document.getElementById('birthdayDay').value = '" + birthdayDayValue + "';"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     "</script>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     "</body>"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     "</html>";
-              server.send(200, "text/html", page);
-            });
+    html.replace("{{ birthday_month }}", String(birthdayMonth));
+    html.replace("{{ birthday_day }}", String(birthdayDay));
+
+    server.send(200, "text/html", html);
+  });
 
   server.on("/submit", []() {
     String ssid = server.arg("ssid");
@@ -535,13 +433,6 @@ void startConfigPortal() {
       if (server.argName(i) == "sync_hours" && server.arg(i).toInt() != 0) {
         syncHoursList.push_back(server.arg(i).toInt());
       }
-    }
-
-    // 处理直辖市和特别行政区
-    String province = server.arg("province");
-    int provinceIndex = province.toInt();
-    if (provinceIndex < 4 || provinceIndex >= sizeof(provincesCities) / sizeof(provincesCities[0]) - 3) {
-      city = provincesCities[provinceIndex][0];
     }
 
     // 格式化生日
@@ -557,7 +448,6 @@ void startConfigPortal() {
     writeParamsToSPIFFS(ssid.c_str(),
                         password.c_str(),
                         city.c_str(),
-                        province.c_str(),
                         birthday_month,
                         birthday_day,
                         syncHours,
@@ -729,7 +619,7 @@ bool getTimeFromServer() {
     SerialPrint("Time Payload: ");
     SerialPrintln(payload.c_str());
 
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (error) {
       SerialPrint("JSON parsing failed: ");
@@ -783,7 +673,7 @@ bool getWeatherFromServer() {
     SerialPrint("Weather Payload: ");
     SerialPrintln(payload.c_str());
 
-    DynamicJsonDocument doc(4096);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (error) {
       SerialPrint("JSON parsing failed: ");
@@ -848,48 +738,6 @@ bool getWeatherFromServer() {
   }
 }
 
-const unsigned char *getWeatherIcon(const char *code) {
-  if (strcmp(code, "0") == 0) return Sunny_icon;
-  else if (strcmp(code, "1") == 0) return Clear_icon;
-  else if (strcmp(code, "2") == 0) return Sunny_icon;
-  else if (strcmp(code, "3") == 0) return Clear_icon;
-  else if (strcmp(code, "4") == 0) return Cloudy_icon;
-  else if (strcmp(code, "5") == 0) return Partlycloudy_icon;
-  else if (strcmp(code, "6") == 0) return Partlycloudy_icon;
-  else if (strcmp(code, "7") == 0) return Partlycloudy_icon;
-  else if (strcmp(code, "8") == 0) return Partlycloudy_icon;
-  else if (strcmp(code, "9") == 0) return Overcast_icon;
-  else if (strcmp(code, "10") == 0) return Shower_icon;
-  else if (strcmp(code, "11") == 0) return Thundershower_icon;
-  else if (strcmp(code, "12") == 0) return Ice_Rain_icon;
-  else if (strcmp(code, "13") == 0) return L_Rain_icon;
-  else if (strcmp(code, "14") == 0) return M_Rain_icon;
-  else if (strcmp(code, "15") == 0) return H_Rain_icon;
-  else if (strcmp(code, "16") == 0) return H_Rain_icon;
-  else if (strcmp(code, "17") == 0) return H_Rain_icon;
-  else if (strcmp(code, "18") == 0) return H_Rain_icon;
-  else if (strcmp(code, "19") == 0) return Ice_Rain_icon;
-  else if (strcmp(code, "20") == 0) return Sleet_icon;
-  else if (strcmp(code, "21") == 0) return L_Snow_icon;
-  else if (strcmp(code, "22") == 0) return L_Snow_icon;
-  else if (strcmp(code, "23") == 0) return M_Snow_icon;
-  else if (strcmp(code, "24") == 0) return H_Snow_icon;
-  else if (strcmp(code, "25") == 0) return H_Snow_icon;
-  else if (strcmp(code, "26") == 0) return Sand_icon;
-  else if (strcmp(code, "27") == 0) return Sand_icon;
-  else if (strcmp(code, "28") == 0) return Sand_icon;
-  else if (strcmp(code, "29") == 0) return Sand_icon;
-  else if (strcmp(code, "30") == 0) return Foggy_icon;
-  else if (strcmp(code, "31") == 0) return Haze_icon;
-  else if (strcmp(code, "32") == 0) return Windy_icon;
-  else if (strcmp(code, "33") == 0) return Windy_icon;
-  else if (strcmp(code, "34") == 0) return Hurricane_icon;
-  else if (strcmp(code, "35") == 0) return Hurricane_icon;
-  else if (strcmp(code, "36") == 0) return Hurricane_icon;
-  else if (strcmp(code, "37") == 0) return H_Snow_icon;
-  else if (strcmp(code, "38") == 0) return Sunny_icon;
-  else return Unknown_icon;
-}
 
 void displayDateTime(const char *dateStr, const char *dayOfWeekStr, PAINT_TIME *sPaint_time) {
   std::lock_guard<std::mutex> lock(epdMutex);  // 锁定
@@ -1054,13 +902,12 @@ void clearParams() {
   strcpy(ssid, "");
   strcpy(password, "");
   strcpy(city, "");
-  strcpy(province, "");
   birthdayMonth = 1;
   birthdayDay = 1;
   syncHoursCount = 8;
   int defaultSyncHours[] = {0, 3, 6, 9, 12, 15, 18, 21};
   memcpy(syncHours, defaultSyncHours, sizeof(defaultSyncHours));
-  writeParamsToSPIFFS(ssid, password, city, province, birthdayMonth, birthdayDay, syncHours, syncHoursCount);
+  writeParamsToSPIFFS(ssid, password, city, birthdayMonth, birthdayDay, syncHours, syncHoursCount);
 }
 
 void readParamsFromSPIFFS() {
@@ -1072,7 +919,7 @@ void readParamsFromSPIFFS() {
   }
 
   String content = file.readString();
-  DynamicJsonDocument doc(1024);
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, content);
   if (error) {
     SerialPrintln("Failed to parse parameter file, using default values");
@@ -1081,7 +928,6 @@ void readParamsFromSPIFFS() {
     strlcpy(ssid, doc["ssid"] | "", sizeof(ssid));
     strlcpy(password, doc["password"] | "", sizeof(password));
     strlcpy(city, doc["city"] | "", sizeof(city));
-    strlcpy(province, doc["province"] | "", sizeof(province));
     birthdayMonth = doc["birthday_month"] | 1;
     birthdayDay = doc["birthday_day"] | 1;
     syncHoursCount = doc["syncHoursCount"];
@@ -1096,16 +942,14 @@ void readParamsFromSPIFFS() {
 void writeParamsToSPIFFS(const char *ssid,
                          const char *password,
                          const char *city,
-                         const char *province,
                          int birthdayMonth,
                          int birthdayDay,
                          const int *syncHours,
                          int syncHoursCount) {
-  DynamicJsonDocument doc(1024);
+  JsonDocument doc;
   doc["ssid"] = ssid;
   doc["password"] = password;
   doc["city"] = city;
-  doc["province"] = province;
   doc["birthday_month"] = birthdayMonth;
   doc["birthday_day"] = birthdayDay;
   doc["syncHoursCount"] = syncHoursCount;
